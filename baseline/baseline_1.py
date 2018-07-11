@@ -34,26 +34,6 @@ def init_model(wf2id,lemma2id,char2id,msd2id):
     msd_lookup = nn.Embedding(len(msd2id), EMBEDDINGS_SIZE)
     output_lookup = nn.Embedding(len(char2id), EMBEDDINGS_SIZE)
 
-class LSTMEncoder(nn.Module):
-    def __init__(self, layers, input_size, state_size):
-        super(LSTMEncoder, self).__init__()
-        self.state_size = state_size
-        self.lstm = nn.LSTM(input_size, state_size, layers)
-        self.state = self.init_state()
-        #self.dropout = nn.Dropout(0.3)
-    
-    def init_state(self):
-        return (torch.zeros(1, 1, self.state_size),
-                torch.zeros(1,1, self.state_size))
-    
-    def forward(self, input_vecs):
-        out_vectors = []
-        for vector in input_vecs:
-
-            out_vector, self.state = self.lstm(vector.view(1, 1, -1), self.state)
-            out_vectors.append(out_vector)
-        return out_vectors
-
 class EncoderRNN(nn.Module):
     def __init__(self, input_size, hidden_size):
         super(EncoderRNN, self).__init__()
@@ -69,58 +49,6 @@ class EncoderRNN(nn.Module):
 
     def initHidden(self):
         return torch.zeros(1, 1, self.hidden_size, device=device)
-
-class AttnLSTMDecoder(nn.Module):
-    def __init__(self, layers, input_size, state_size):
-        super(AttnLSTMDecoder, self).__init__()
-        self.state_size = state_size
-        self.lstm = nn.LSTM(input_size, state_size, layers)
-        self.state = self.init_state()
-        self.w1 = nn.Linear(STATE_SIZE*2, ATTENTION_SIZE, bias=False)
-        self.w2 = nn.Linear(STATE_SIZE*2*LSTM_NUM_OF_LAYERS, ATTENTION_SIZE, bias=False)
-        self.v = nn.Linear(ATTENTION_SIZE, 1)
-        self.linear = nn.Linear(STATE_SIZE, len(char2id))
-        #self.dropout = nn.Dropout(0.3)
-
-    def init_state(self):
-        return (torch.zeros(1,1, self.state_size), torch.zeros(1,1, self.state_size))
-
-    def attend(self, input_mat, w1dt):
-        w2dt = self.w2(torch.cat(self.state, 2))
-        unnormalized = self.v(F.tanh(torch.add(w1dt, w2dt)))
-        att_weights = F.softmax(unnormalized.view(-1,1),dim=0)
-        input_matrix = torch.t(input_mat.view(-1,2*ATTENTION_SIZE))
-        # cj = sum(alphai*ci) for i from 1 to n
-        context = input_matrix.mm(att_weights)
-        return context
-
-    def forward(self, vectors, output):
-        output = [EOS] + list(output) + [EOS]
-        output = [char2id[c] for c in output]
-        loss = torch.zeros(1)
-        input_mat = torch.cat(vectors)
-        w1dt = None 
-        last_output_embeddings = output_lookup(torch.tensor([char2id[EOS]]))
-        initial_input = torch.cat((torch.zeros(1, STATE_SIZE*2), last_output_embeddings), 1)
-        _, self.state = self.lstm(initial_input.view(1, 1, -1), self.state)
-
-        w1dt = self.w1(torch.t(input_mat))
-   
-        for char in output:
-            # # w1dt can be computed and cached once for the entire decoding phase
-            # if not w1dt:
-            #      w1dt = self.w1(torch.t(input_mat))
-            vector = torch.cat((self.attend(input_mat, w1dt), last_output_embeddings.view(-1,1)))
-            out, self.state = self.lstm(vector.view(1, 1, -1), self.state)
-            out_vector = self.linear(out)
-
-            probs = F.softmax(out_vector, dim=2).view(-1)
-
-            last_output_embeddings = output_lookup(torch.tensor([char]))
-            loss = torch.cat((loss, -torch.log(probs[char]).view(1)))
-
-        loss = torch.sum(loss)
-        return loss
 
 class AttnDecoderRNN(nn.Module):
     def __init__(self, hidden_size, output_size, dropout_p=0.1):
@@ -151,8 +79,6 @@ class AttnDecoderRNN(nn.Module):
         attn_scores = F.softmax(self.score(H, encoder_outputs)).unsqueeze(1)
         context = torch.bmm(attn_scores, encoder_outputs)
         
-        # attn_weights = F.softmax(self.attn(torch.cat((embedded[0], hidden[0]), 1)), dim=1)
-        # attn_applied = torch.bmm(attn_weights.unsqueeze(0),encoder_outputs.unsqueeze(0))
         output = torch.cat((embedded, context), 2)
         output, hidden = self.gru(output, hidden)
         output = F.softmax(self.out(output), dim=2)
@@ -190,7 +116,6 @@ def decode(encoder_outputs, output, decoder):
     output = [char2id[c] for c in output]
     loss = torch.zeros(1)
     decoder.zero_grad()
-    # decoder_hidden = encoder_fwd.hidden
     decoder_hidden = decoder.initHidden()
     decoder_input = output_lookup(torch.tensor([char2id[EOS]]))
 
@@ -346,10 +271,6 @@ def train(traindata,devdata,wf2id,lemma2id,char2id,id2char,msd2id,epochs=20):
     # encoder_bwd = LSTMEncoder(LSTM_NUM_OF_LAYERS, 8*EMBEDDINGS_SIZE, STATE_SIZE)
     decoder = AttnDecoderRNN(STATE_SIZE, len(id2char), 0.3)
 
-    # encoder_fwd_optimizer = optim.SGD(encoder_fwd.parameters(), lr=0.1)
-    # encoder_bwd_optimizer = optim.SGD(encoder_bwd.parameters(), lr=0.1)
-    # decoder_optimizer = optim.SGD(decoder.parameters(), lr=0.1)
-
     encoder_fwd_optimizer = optim.Adam(encoder_fwd.parameters())
     # encoder_bwd_optimizer = optim.Adam(encoder_bwd.parameters())
     decoder_optimizer = optim.Adam(decoder.parameters())
@@ -365,7 +286,6 @@ def train(traindata,devdata,wf2id,lemma2id,char2id,id2char,msd2id,epochs=20):
                              (n+1,len(traindata)))
                 if (iscandidatemsd(msd) or (msd == NONE and lemma != NONE))\
                    and random() < SAMPLETRAIN:
-                    # loss = get_loss(i,s, encoder_fwd, encoder_bwd, decoder)
                     loss = get_loss(i,s, encoder_fwd, decoder)
                     loss_value = loss.item()
                     loss.backward()
