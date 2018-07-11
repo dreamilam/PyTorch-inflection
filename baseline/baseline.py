@@ -38,6 +38,7 @@ class LSTMEncoder(nn.Module):
         self.state_size = state_size
         self.lstm = nn.LSTM(input_size, state_size, layers)
         self.state = self.init_state()
+        #self.dropout = nn.Dropout(0.3)
     
     def init_state(self):
         return (torch.zeros(1, 1, self.state_size),
@@ -46,6 +47,7 @@ class LSTMEncoder(nn.Module):
     def forward(self, input_vecs):
         out_vectors = []
         for vector in input_vecs:
+
             out_vector, self.state = self.lstm(vector.view(1, 1, -1), self.state)
             out_vectors.append(out_vector)
         return out_vectors
@@ -60,6 +62,7 @@ class AttnLSTMDecoder(nn.Module):
         self.w2 = nn.Linear(STATE_SIZE*2*LSTM_NUM_OF_LAYERS, ATTENTION_SIZE, bias=False)
         self.v = nn.Linear(ATTENTION_SIZE, 1)
         self.linear = nn.Linear(STATE_SIZE, len(char2id))
+        #self.dropout = nn.Dropout(0.3)
 
     def init_state(self):
         return (torch.zeros(1,1, self.state_size), torch.zeros(1,1, self.state_size))
@@ -67,38 +70,37 @@ class AttnLSTMDecoder(nn.Module):
     def attend(self, input_mat, w1dt):
         w2dt = self.w2(torch.cat(self.state, 2))
         unnormalized = self.v(F.tanh(torch.add(w1dt, w2dt)))
-
-        att_weights = F.softmax(unnormalized.view(-1,1))
+        att_weights = F.softmax(unnormalized.view(-1,1),dim=0)
         input_matrix = torch.t(input_mat.view(-1,2*ATTENTION_SIZE))
+        # cj = sum(alphai*ci) for i from 1 to n
         context = input_matrix.mm(att_weights)
-
         return context
 
     def forward(self, vectors, output):
         output = [EOS] + list(output) + [EOS]
         output = [char2id[c] for c in output]
         loss = torch.zeros(1)
-
         input_mat = torch.cat(vectors)
-
         w1dt = None 
         last_output_embeddings = output_lookup(torch.tensor([char2id[EOS]]))
-        initial_input = torch.cat((torch.zeros(STATE_SIZE*2).view(1,-1), last_output_embeddings), 1)
+        initial_input = torch.cat((torch.zeros(1, STATE_SIZE*2), last_output_embeddings), 1)
         _, self.state = self.lstm(initial_input.view(1, 1, -1), self.state)
-        
+
         w1dt = self.w1(torch.t(input_mat))
+   
         for char in output:
             # # w1dt can be computed and cached once for the entire decoding phase
             # if not w1dt:
-            #     w1dt = self.w1(torch.t(input_mat))
+            #      w1dt = self.w1(torch.t(input_mat))
             vector = torch.cat((self.attend(input_mat, w1dt), last_output_embeddings.view(-1,1)))
             out, self.state = self.lstm(vector.view(1, 1, -1), self.state)
             out_vector = self.linear(out)
-            probs = F.softmax(out_vector.view(1,-1)).view(-1)
+
+            probs = F.softmax(out_vector, dim=2).view(-1)
 
             last_output_embeddings = output_lookup(torch.tensor([char]))
-
             loss = torch.cat((loss, -torch.log(probs[char]).view(1)))
+
         loss = torch.sum(loss)
         return loss
 
@@ -147,7 +149,7 @@ def dropitem(item,item2id,training):
 def embed_context(prevword,prevlemma,prevmsd,lemma,
                   nextword,nextlemma,nextmsd):
     """ Emebed context elements. """
-
+    
     return torch.cat((word_lookup(prevword), word_lookup(nextword),
                            lemma_lookup(prevlemma), lemma_lookup(nextlemma),
                            msd_lookup(prevmsd),msd_lookup(nextmsd),
@@ -292,13 +294,17 @@ def train(traindata,devdata,wf2id,lemma2id,char2id,id2char,msd2id,epochs=20):
     encoder_bwd = LSTMEncoder(LSTM_NUM_OF_LAYERS, 8*EMBEDDINGS_SIZE, STATE_SIZE)
     decoder = AttnLSTMDecoder(LSTM_NUM_OF_LAYERS,STATE_SIZE*2+EMBEDDINGS_SIZE, STATE_SIZE)
 
-    encoder_fwd_optimizer = optim.SGD(encoder_fwd.parameters(), lr=0.1)
-    encoder_bwd_optimizer = optim.SGD(encoder_bwd.parameters(), lr=0.1)
-    decoder_optimizer = optim.SGD(decoder.parameters(), lr=0.1)
+    # encoder_fwd_optimizer = optim.SGD(encoder_fwd.parameters(), lr=0.1)
+    # encoder_bwd_optimizer = optim.SGD(encoder_bwd.parameters(), lr=0.1)
+    # decoder_optimizer = optim.SGD(decoder.parameters(), lr=0.1)
+
+    encoder_fwd_optimizer = optim.Adam(encoder_fwd.parameters())
+    encoder_bwd_optimizer = optim.Adam(encoder_bwd.parameters())
+    decoder_optimizer = optim.Adam(decoder.parameters())
     
     for epoch in range(epochs):
         print("EPOCH %u" % (epoch + 1))
-        shuffle(traindata)
+        #shuffle(traindata)
         total_loss = 0
         for n,s in enumerate(traindata):
             for i,fields in enumerate(s):
