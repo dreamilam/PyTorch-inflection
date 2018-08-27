@@ -9,4 +9,4 @@ System1 is adapted from the baseline that was provided by the organizers of Sigm
 
 To run the code, use the following command
 
-python3 baseline/baseline.py trainsets/en-track1-high devsets/en-track1-covered devsets/en-uncovered
+python3 baseline/system1.py trainsets/en-track1-high devsets/en-track1-covered devsets/en-uncovered
