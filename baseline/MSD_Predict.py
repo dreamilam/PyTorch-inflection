@@ -27,7 +27,7 @@ SAMPLETRAIN=0.1
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def init_model(wf2id,lemma2id,char2id,msd2id):
-    global character_lookup,word_lookup, lemma_lookup, msd_lookup, attention_w1, attention_w2, output_lookup
+    global character_lookup,word_lookup, lemma_lookup, msd_lookup, output_lookup
 
     character_lookup = nn.Embedding(len(char2id), EMBEDDINGS_SIZE)
     word_lookup = nn.Embedding(len(wf2id), EMBEDDINGS_SIZE)
