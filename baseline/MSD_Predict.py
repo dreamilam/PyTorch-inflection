@@ -14,7 +14,7 @@ torch.manual_seed(1)
 
 from data import read_dataset, UNK, EOS, NONE, WF, LEMMA, MSD
 
-LSTM_NUM_OF_LAYERS = 2
+LSTM_NUM_OF_LAYERS = 1
 EMBEDDINGS_SIZE = 100
 STATE_SIZE = 100
 ATTENTION_SIZE = 100
@@ -22,7 +22,7 @@ WFDROPOUT=0.1
 LSTMDROPOUT=0.3
 # Every epoch, we train on a subset of examples from the train set,
 # namely, 30% of them randomly sampled.
-SAMPLETRAIN=0.3
+SAMPLETRAIN=0.1
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -59,31 +59,13 @@ class AttnDecoderRNN(nn.Module):
         self.dropout_p = dropout_p
 
         self.dropout = nn.Dropout(self.dropout_p)
-        self.lstm = nn.LSTM(self.hidden_size * 7, self.hidden_size)
+        self.lstm = nn.LSTM(self.hidden_size * 6, self.hidden_size)
         self.out = nn.Linear(self.hidden_size, self.output_size)
 
-        self.attn1 = nn.Linear(self.hidden_size * 8, self.hidden_size)
-        self.attn2 = nn.Linear(self.hidden_size, 1)
-
-    def score(self, hidden, encoder_outputs):
-        tanh = torch.nn.Tanh()
-        attn1_output = tanh(self.attn1(torch.cat([encoder_outputs, hidden], 2)))  
-        scores = self.attn2(attn1_output)
-        return scores.squeeze(2)  
-
-    def forward(self, _input, hidden, encoder_outputs):
-        embedded = _input.view(1, 1, -1)
-        # embedded = self.dropout(embedded)
-        H = torch.cat((hidden[0], hidden[1]), 2)
-        H = H.repeat(1, encoder_outputs.size(0), 1)
-
+    def forward(self, encoder_outputs, hidden):
         encoder_outputs = encoder_outputs.unsqueeze(0)
 
-        attn_scores = F.softmax(self.score(H, encoder_outputs)).unsqueeze(1)
-        context = torch.bmm(attn_scores, encoder_outputs)
-        
-        output = torch.cat((embedded, context), 2)
-        output, hidden = self.lstm(output, hidden)
+        output, hidden = self.lstm(encoder_outputs, hidden)
         output = F.softmax(self.out(output), dim=2)
         return output, hidden
 
@@ -98,31 +80,25 @@ def iscandidatemsd(msd):
 def encode(embedded, encoder_fwd):
     encoder_fwd.zero_grad()
     encoder_fwd.hidden = encoder_fwd.initHidden()
-    encoder_fwd_outputs = torch.zeros(len(embedded), 2*encoder_fwd.hidden_size)
+    encoder_fwd_output = torch.zeros(1, 2*encoder_fwd.hidden_size)
     # embedded = Variable(embedded)
 
     for ei in range(len(embedded)):
         encoder_fwd_output, encoder_fwd.hidden = encoder_fwd(embedded[ei], encoder_fwd.hidden)
-        encoder_fwd_outputs[ei] = encoder_fwd_output[0,0]
+        
+    return encoder_fwd_output
 
-    encoder_outputs = encoder_fwd_outputs
-    return encoder_outputs
+def decode(encoder_outputs, output_msd, decoder):
 
-def decode(encoder_outputs, output, decoder):
-    output = [EOS] + list(output) + [EOS]
-    output = [char2id[c] for c in output]
     loss = torch.zeros(1)
     decoder.zero_grad()
+    msd_index = msd2id[output_msd]
  
     decoder_hidden = decoder.initHidden()
-    decoder_input = output_lookup(torch.LongTensor([char2id[EOS]]))
+    decoder_output, _ = decoder(encoder_outputs, decoder_hidden)
 
-    for char in output:
-        decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden, encoder_outputs)
-        decoder_input = output_lookup(torch.LongTensor([char]))
-        loss = torch.cat((loss, -torch.log(decoder_output[0][0][char]).view(1)))
+    loss = -torch.log(decoder_output[0][0][msd_index]).view(1)
 
-    loss = torch.sum(loss)
     return loss
 
 def embed(lemma,context):
@@ -134,8 +110,7 @@ def embed(lemma,context):
 
     global character_lookup
 
-    return [torch.cat([character_lookup(torch.tensor([c])), context], 1)
-            for c in lemma]
+    return [torch.cat([character_lookup(torch.tensor([c])), context], 1) for c in lemma]
 
 def dropitem(item,item2id,training):
     return item2id[UNK if not item in item2id 
@@ -157,23 +132,10 @@ def get_context(i,s,training=0):
         word forms, lemmas and MSDs as well as the MSD for the lemma
         in question.
     """
-    prevword = s[i-1][WF] if i > 0 else EOS
-    prevlemma = s[i-1][LEMMA] if i > 0 else EOS
-    prevmsd = s[i-1][MSD] if i > 0 else EOS
-    nextword = s[i+1][WF] if i + 1 < len(s) else EOS
     lemma = s[i][LEMMA] 
-    nextlemma = s[i+1][LEMMA] if i + 1 < len(s) else EOS
-    nextmsd = s[i+1][MSD] if i + 1 < len(s) else EOS
-
-    prevword = torch.LongTensor([dropitem(prevword,wf2id,training)])
-    nextword = torch.LongTensor([dropitem(nextword,wf2id,training)])
-    prevlemma = torch.LongTensor([dropitem(prevlemma,lemma2id,training)])
-    nextlemma = torch.LongTensor([dropitem(nextlemma,lemma2id,training)])
-    prevmsd = torch.LongTensor([dropitem(prevmsd,msd2id,training)])
-    nextmsd = torch.LongTensor([dropitem(nextmsd,msd2id,training)])
     lemma = torch.LongTensor([dropitem(lemma,lemma2id,training)])
 
-    return embed_context(prevword,prevlemma,prevmsd,lemma,nextword,nextlemma,nextmsd)
+    return lemma_lookup(lemma)
 
 def get_sentence_context(i,s, training=1):
     word = s[i][WF] if i > 0 else EOS
@@ -209,11 +171,12 @@ def get_loss(i, s, encoder_fwd, decoder, encoder_left, encoder_right):
 
     context = get_context(i,s,training=1)
     embedded = embed(s[i][LEMMA], context)
-    encoder_outputs = encode(embedded, encoder_fwd)
-    encoded_left = get_left_encoding(i,s, encoder_left).squeeze(0).repeat(encoder_outputs.size(0), 1)
-    encoded_right = get_right_encoding(i,s, encoder_right).squeeze(0).repeat(encoder_outputs.size(0), 1)
-    encoder_outputs = torch.cat((encoder_outputs, encoded_left, encoded_right), 1)
-    loss =  decode(encoder_outputs, s[i][WF], decoder)
+    encoder_output = encode(embedded, encoder_fwd).squeeze(0)
+
+    encoded_left = get_left_encoding(i,s, encoder_left).squeeze(0).repeat(encoder_output.size(0), 1)
+    encoded_right = get_right_encoding(i,s, encoder_right).squeeze(0).repeat(encoder_output.size(0), 1)
+    encoder_outputs = torch.cat((encoder_output, encoded_left, encoded_right), 1)
+    loss =  decode(encoder_outputs, s[i][MSD], decoder)
     return loss
 
 def memolrec(func):
@@ -250,24 +213,25 @@ def levenshtein(s, t, inscost = 1.0, delcost = 1.0, substcost = 1.0):
     return answer[0],answer[1],answer[4]
 
 def eval(devdata,id2char,encoder_fwd, decoder, encoder_left, encoder_right, generating=1, outf=None):
-    input, gold = devdata
+    _input, gold = devdata
     corr = 0.0
     lev=0.0
     tot = 0.0
-    for n,s in enumerate(input):
+    for n,s in enumerate(_input):
         for i,fields in enumerate(s):
             wf, lemma, msd = fields            
             if msd == NONE and lemma != NONE:
                 if generating:
-                    wf = generate(i,s,id2char, encoder_fwd, decoder, encoder_left, encoder_right)
-                if wf == gold[n][i][WF]:
-                    corr += 1
-                lev += levenshtein(wf,gold[n][i][WF])[2]
-                tot += 1
-            if outf:
-                outf.write('%s\n' % '\t'.join([wf,lemma,msd]))
-        if outf:
-            outf.write('\n')
+                    msd_pred = generate(i,s,id2char, encoder_fwd, decoder, encoder_left, encoder_right)
+                    outf.write('%s\n' % '\t'.join([lemma,gold[n][i][WF],msd_pred]))
+                # if wf == gold[n][i][WF]:
+                #     corr += 1
+        #         lev += levenshtein(wf,gold[n][i][WF])[2]
+        #         tot += 1
+            # if outf:
+            #     outf.write('%s\n' % '\t'.join([lemma,gold[n][i][WF],msd_pred]))
+        # if outf:
+        #     outf.write('\n')
     return (0,0) if tot == 0 else (corr / tot, lev/tot)
 
 def generate(i, s, id2char, encoder_fwd, decoder, encoder_left, encoder_right):
@@ -275,34 +239,25 @@ def generate(i, s, id2char, encoder_fwd, decoder, encoder_left, encoder_right):
     with torch.no_grad():
         context = get_context(i,s)
         embedded = embed(s[i][LEMMA],context)
-        encoder_outputs = encode(embedded, encoder_fwd)
+        encoder_outputs = encode(embedded, encoder_fwd).squeeze(0)
         encoded_left = get_left_encoding(i,s, encoder_left).squeeze(0).repeat(encoder_outputs.size(0), 1)
         encoded_right = get_right_encoding(i,s, encoder_right).squeeze(0).repeat(encoder_outputs.size(0), 1)
+
         encoder_outputs = torch.cat((encoder_outputs, encoded_left, encoded_right), 1)
-        in_seq = s[i][LEMMA]
 
-        decoder_input = output_lookup(torch.LongTensor([char2id[EOS]]))
+        decoder_input = encoder_outputs
         decoder_hidden = decoder.initHidden()
-        out = ''
-        count_EOS = 0
 
-        for i in range(len(in_seq)*2):
-            if count_EOS == 2: break
-            decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden, encoder_outputs)
-            probs = decoder_output.view(-1)
-            max_, idx = probs.max(0)
-            next_char = idx.item()
-            
-            decoder_input = output_lookup(torch.LongTensor([next_char]))
-            if id2char[next_char] == EOS:
-                count_EOS += 1
-                continue
-            out += id2char[next_char]
-    return out
+        decoder_output, decoder_hidden = decoder(decoder_input, decoder_hidden)
+        probs = decoder_output.view(-1)
+        max_, idx = probs.max(0)
+        msd_pred = id2msd[idx.item()]
+        
+    return msd_pred
 
 def train(traindata,devdata,wf2id,lemma2id,char2id,id2char,msd2id,epochs=20):
-    encoder_fwd = EncoderRNN(8*EMBEDDINGS_SIZE, STATE_SIZE, bidirectional=True)
-    decoder = AttnDecoderRNN(STATE_SIZE, len(id2char), 0.3)
+    encoder_fwd = EncoderRNN(2*EMBEDDINGS_SIZE, STATE_SIZE, bidirectional=True)
+    decoder = AttnDecoderRNN(STATE_SIZE, len(id2msd), 0.3)
     encoder_left = EncoderRNN(3*EMBEDDINGS_SIZE, STATE_SIZE, bidirectional=True)
     encoder_right = EncoderRNN(3*EMBEDDINGS_SIZE, STATE_SIZE, bidirectional=True)
 
@@ -313,16 +268,19 @@ def train(traindata,devdata,wf2id,lemma2id,char2id,id2char,msd2id,epochs=20):
     
     for epoch in range(epochs):
         print("EPOCH %u" % (epoch + 1))
-        shuffle(traindata)
+        train_idx = int(0.8 * len(traindata))
+        actual_traindata = traindata[:train_idx]
+        shuffle(actual_traindata)
         total_loss = 0
-        for n,s in enumerate(traindata):
+
+        for n,s in enumerate(actual_traindata):
             for i,fields in enumerate(s):
                 wf, lemma, msd = fields
                 stdout.write("Example %u of %u\r" % 
                              (n+1,len(traindata)))
-                # if (iscandidatemsd(msd) or (msd == NONE and lemma != NONE))\
+                if (iscandidatemsd(msd) or (msd == NONE and lemma != NONE)):
                 #    and random() < SAMPLETRAIN:
-                if (True):
+                # if (True):
                 #    and random() < SAMPLETRAIN:
                     loss = get_loss(i,s, encoder_fwd, decoder, encoder_left, encoder_right)
                     loss_value = loss.item()
@@ -334,21 +292,36 @@ def train(traindata,devdata,wf2id,lemma2id,char2id,id2char,msd2id,epochs=20):
                     total_loss += loss_value
         print("\nLoss per sentence: %.3f" % (total_loss/len(traindata)))
         print("Example outputs:")
-        for s in traindata[:5]:
+        for s in actual_traindata[:10]:
             for i,fields in enumerate(s):
                 wf, lemma, msd = fields
-                if (iscandidatemsd(msd) or (msd == NONE and lemma != NONE))\
-                   and random() < SAMPLETRAIN:
-                    print("INPUT:", s[i][LEMMA], "OUTPUT:",
+                if (iscandidatemsd(msd) or (msd == NONE and lemma != NONE)):
+                #    and random() < SAMPLETRAIN:
+                    print("Gold_msd:", s[i][MSD], "Output:",
                           generate(i,s,id2char, encoder_fwd, decoder, encoder_left, encoder_right),
-                          "GOLD:",wf)
+                          "WF:",wf)
                     break
-        outf = open('eng-high.txt', 'w')
-        devacc, devlev = eval(devdata,id2char,encoder_fwd, decoder, encoder_left, encoder_right, 1, outf)
-        outf.close()
-        print("Development set accuracy: %.2f" % (100*devacc))
-        print("Development set avg. Levenshtein distance: %.2f" % devlev)
+        corr = 0
+        count = 0
+        for s in traindata[train_idx:]:
+            for i,fields in enumerate(s):
+                wf, lemma, msd = fields
+                if (iscandidatemsd(msd) or (msd == NONE and lemma != NONE)):
+                    msd_pred = generate(i,s,id2char, encoder_fwd, decoder, encoder_left, encoder_right)
+                    if msd_pred == s[i][MSD]:
+                        corr += 1
+                    count += 1
         print()
+        print(corr, count)
+        print("Devset efficiency = ", corr/count*100)
+        outf = None
+        if epoch == 9:
+            outf = open('low-dev', 'w')
+            devacc, devlev = eval(devdata,id2char,encoder_fwd, decoder, encoder_left, encoder_right, 1, outf)
+            outf.close()
+        # print("Development set accuracy: %.2f" % (100*devacc))
+        # print("Development set avg. Levenshtein distance: %.2f" % devlev)
+        # print()
 
 
 if __name__=='__main__':
@@ -357,8 +330,9 @@ if __name__=='__main__':
     devgolddata, _, _, _, _ = read_dataset(sysargv[3])
 
     id2char = {id:char for char,id in char2id.items()}
+    id2msd = {id:msd for msd,id in msd2id.items()}
     init_model(wf2id,lemma2id,char2id,msd2id)
     train(traindata,[devinputdata,devgolddata],
-          wf2id,lemma2id,char2id,id2char,msd2id,20)    
+          wf2id,lemma2id,char2id,id2char,msd2id,10)    
     # eval([devinputdata,devgolddata],id2char,generating=1,
     #      outf=open("%s-out" % sysargv[2],"w"))
